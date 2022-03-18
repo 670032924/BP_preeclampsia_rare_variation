@@ -1,0 +1,920 @@
+---
+title: "Research project update (January 2022)"
+author: 'Michaelis Vasiliadis'
+date: "18/01/2022"
+output:
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+# Setting global options 
+knitr::opts_chunk$set(echo = FALSE, eval = TRUE, message=FALSE, warning = FALSE, fig.align = "center", tidy.opts = list(width.cutoff = 60), tidy = TRUE)
+```
+
+```{r}
+# Loading in required packages
+library(tidyverse)
+library(magrittr)
+library(patchwork)
+library(readr)
+library(readxl)
+library(lubridate)
+library(stringr)
+library(sf)
+library(zoo)
+library(knitr)
+library(kableExtra)
+theme_set(theme_bw())
+```
+
+$~$
+
+
+$~$
+
+### Curating candidate gene list 
+
+```{r}
+BP_genes <- read_excel("final_BP_gene_list.xlsx")
+
+# creating table of candidate genes for presentation 
+cand_genes <- BP_genes %>% 
+                unite("start:stop", c(gene_start, gene_stop), sep = '-') %>% 
+                unite("Gene Position", c(gene_chr, "start:stop"), sep = ':') %>% 
+                select(gene, "Gene Position", gene_source, rsID, 'SNP_CHR:BP') %>% 
+                mutate(gene_source = ifelse(gene_source == 'nearest_gene_to_BP_locus', 'Nearest Gene to GWAS Blood Pressure Locus', 
+                                            'Literature Search')) %>% 
+                mutate(gene_source = ifelse(gene %in% c("ZNF831", "FTO", "FGF5", "SH2B3"), "Preeclampsia GWAS locus also associated with BP",
+                                            gene_source)) %>% 
+                rename('Gene Name' = gene, "Gene Position\n(chr:start-stop, GRCh37)" = "Gene Position", 'Identification method' = gene_source, 
+                'SNP ID' = rsID, 'SNP Position\n(chr:bp, GRCh37)' = 'SNP_CHR:BP') 
+
+cand_genes %>% 
+    kbl() %>%
+    kable_paper() %>% 
+    column_spec(1, italic = T) %>% 
+    footnote(general = "chr, chromosome; bp, base pair; GRCh37, Genome Reference Consortium Human Build 37; SNP, Index Single Nucleotide Polymorphism at Blood Pressure Genome Wide Association Study locus; NA values for SNP ID and SNP position correspond to genes identified through the literature search", general_title = "\n")
+```
+
+$~$
+
+### AstraZeneca PheWas and Genebass gene-level association results for BP phenotypes 
+
+```{r}
+# Importing AstraZeneca PheWas BP association results from file downloaded from AZ Phewas portal 
+
+## Diastolic BP | automated reading, AstraZeneca PheWas results 
+
+diastBP_aut <- read_csv("Diastolic_blood_pressure_automated_reading_filtered_table_AZ_PheWAS_Portal.csv")
+
+diastBP_aut <- diastBP_aut %>% 
+        # extracting the genes in our curated BP genes list
+        filter(Gene %in% unique(BP_genes$gene))  %>% 
+        # adding phenotype ID column
+        mutate(phenotype = "dias_BP_automated") %>% 
+        # renaming columns 
+        rename(gene = "Gene", collapsing_model = "Collapsing model", p_value = "P value", N_with_QV = "No. with QV", 
+               N_without_QV = "No. without QV", QV_carrier_median = "QV carrier median", QV_non_carrier_median = "QV non-carrier median", 
+               Effect_size = "Effect size", Effect_size_standard_error = "Effect size standard error", 
+               Effect_size_LCI = "Effect size LCI", Effect_size_UCI = "Effect size UCI")
+
+## Systolic BP | automated reading, AstraZeneca PheWas results 
+
+systBP_aut <- read_csv("Systolic_blood_pressure_automated_reading_filtered_table_AZ_PheWAS_Portal.csv")
+
+systBP_aut <- systBP_aut %>% 
+        # extracting the genes in our curated BP genes list
+        filter(Gene %in% unique(BP_genes$gene))  %>% 
+        # adding phenotype ID column
+        mutate(phenotype = "syst_BP_automated") %>% 
+        # renaming columns 
+        rename(gene = "Gene", collapsing_model = "Collapsing model", p_value = "P value", N_with_QV = "No. with QV", 
+               N_without_QV = "No. without QV", QV_carrier_median = "QV carrier median", QV_non_carrier_median = "QV non-carrier median", 
+               Effect_size = "Effect size", Effect_size_standard_error = "Effect size standard error", 
+               Effect_size_LCI = "Effect size LCI", Effect_size_UCI = "Effect size UCI")
+
+## Concatenating the AstraZeneca PheWas BP results tables, filtering on masks that we will focus on 
+
+BP_aut_az <- rbind(diastBP_aut, systBP_aut) %>% 
+              # selecting a subset of the collapsing models / masks used in the AstraZeneca PheWas study 
+              filter(collapsing_model %in% c('ptvraredmg', 'URmtr', 'flexdmg')) 
+```
+
+```{r}
+# Importing Genebass association results from file obtained from SPARK HAIL cluster querying 
+
+## file with all phenotypes of interest 
+genebass_assoc <- read_tsv('genebass_300k_results.tsv')
+
+genebass_assoc <- genebass_assoc %>% 
+                    # removing unnecessary columns 
+                    select(!c('...1', gene_id, markerAFs, trait_type, pheno_sex, coding, description_more,	category)) %>%      
+                    rename(gene = 'gene_symbol', p_value_skato = 'Pvalue', p_value_burden = 'Pvalue_Burden') %>% 
+                    mutate(SE_Burden = as.numeric(SE_Burden)) 
+
+## extracting BP phenotypes 
+
+diastBP_aut_gb <- genebass_assoc %>% 
+                    filter(description == 'Diastolic blood pressure, automated reading') %>% 
+                    mutate(phenotype = 'diast_BP_automated') %>% 
+                    select(!description)
+
+systBP_aut_gb <- genebass_assoc %>% 
+                    filter(description == 'Systolic blood pressure, automated reading') %>% 
+                    mutate(phenotype = 'syst_BP_automated') %>% 
+                    select(!description)
+
+## Concatenating the Genebass BP results tables
+
+BP_aut_gb <- rbind(diastBP_aut_gb, systBP_aut_gb)
+```
+
+$~$
+
+#### AstraZeneca PheWas Diastolic BP gene-level association results
+
+```{r}
+# Presenting AZ BP association results in wide table format 
+
+to_scientific <- function(x) {
+    formatC(x, format = "e", digits = 3)
+}
+
+## dias_BP_automated
+dias_BP_automated_wide <- BP_aut_az %>% 
+    filter(phenotype == 'dias_BP_automated') %>% 
+    select(gene, collapsing_model, p_value, Effect_size, Effect_size_LCI, Effect_size_UCI) %>% 
+    pivot_wider(names_from = collapsing_model, names_sep = ".", values_from = c(p_value, Effect_size, Effect_size_LCI, Effect_size_UCI)) %>% 
+    mutate_at(c("Effect_size.flexdmg", "Effect_size.ptvraredmg", "Effect_size.URmtr", 
+                "Effect_size_LCI.flexdmg", "Effect_size_LCI.ptvraredmg", "Effect_size_LCI.URmtr",	
+                "Effect_size_UCI.flexdmg", "Effect_size_UCI.ptvraredmg", "Effect_size_UCI.URmtr"), round, digits = 3) %>% 
+    mutate_at(c("p_value.flexdmg", "p_value.ptvraredmg", "p_value.URmtr"), to_scientific) %>% 
+
+    #combining flexdmg columns to get effect size (95% CI) format
+    unite("flexdmg_CI", c(Effect_size_LCI.flexdmg, Effect_size_UCI.flexdmg), sep = ", ", remove = TRUE, na.rm = TRUE) %>% 
+    unite("flexdmg_effect_CI", c(Effect_size.flexdmg, flexdmg_CI), sep = " (", remove = TRUE, na.rm = TRUE) %>% 
+    mutate(cl_par = ')') %>%     # adding closing paranthesis to end of string in each row 
+    mutate(flexdmg_effect_CI = paste0(flexdmg_effect_CI, cl_par))   %>% 
+
+    #combining ptvraredmg columns to get effect size (95% CI) format
+    unite("ptvraredmg_CI", c(Effect_size_LCI.ptvraredmg, Effect_size_UCI.ptvraredmg), sep = ", ", remove = TRUE, na.rm = TRUE) %>% 
+    unite("ptvraredmg_effect_CI", c(Effect_size.ptvraredmg, ptvraredmg_CI), sep = " (", remove = TRUE, na.rm = TRUE) %>% 
+    mutate(cl_par = ')') %>%     # adding closing paranthesis to end of string in each row 
+    mutate(ptvraredmg_effect_CI = paste0(ptvraredmg_effect_CI, cl_par)) %>% 
+
+    #combining URmtr columns to get effect size (95% CI) format
+    unite("URmtr_CI", c(Effect_size_LCI.URmtr, Effect_size_UCI.URmtr), sep = ", ", remove = TRUE, na.rm = TRUE) %>% 
+    unite("URmtr_effect_CI", c(Effect_size.URmtr, URmtr_CI), sep = " (", remove = TRUE, na.rm = TRUE) %>% 
+    mutate(cl_par = ')') %>%     # adding closing paranthesis to end of string in each row 
+    mutate(URmtr_effect_CI = paste0(URmtr_effect_CI, cl_par)) %>% 
+
+    mutate(across(everything(), ~replace(., . ==  ')', NA))) %>% 
+
+    select(gene, flexdmg_effect_CI, p_value.flexdmg, ptvraredmg_effect_CI, p_value.ptvraredmg, URmtr_effect_CI, p_value.URmtr) %>% 
+    rename("Gene name" = gene, "Effect size (95% CI).1" = flexdmg_effect_CI, "P-value.1" = p_value.flexdmg, 
+           "Effect size (95% CI).2" = ptvraredmg_effect_CI, "P-value.2" = p_value.ptvraredmg, "Effect size (95% CI).3" = URmtr_effect_CI, 
+           "P-value.3" = p_value.URmtr)
+
+names(dias_BP_automated_wide) <- sub("\\.\\d+$", "", names(dias_BP_automated_wide)) 
+   
+dias_BP_automated_wide %>% kbl() %>%
+                              kable_paper() %>%
+                              add_header_above(c(" " = 1, "Flexdmg" = 2, "ptvraredmg" = 2, "URmtr" = 2)) %>% 
+                              add_header_above(c(" ", "AstraZeneca Phewas Variant Collapsing Model" = 6)) %>% 
+                              column_spec(1, italic = T)
+```
+
+$~$
+
+#### AstraZeneca PheWas Systolic BP gene-level association results
+
+```{r}
+## syst_BP_automated
+syst_BP_automated_wide <- BP_aut_az %>% 
+    filter(phenotype == 'syst_BP_automated') %>% 
+    select(gene, collapsing_model, p_value, Effect_size, Effect_size_LCI, Effect_size_UCI) %>% 
+    pivot_wider(names_from = collapsing_model, names_sep = ".", values_from = c(p_value, Effect_size, Effect_size_LCI, Effect_size_UCI)) %>% 
+    mutate_at(c("Effect_size.flexdmg", "Effect_size.ptvraredmg", "Effect_size.URmtr", "Effect_size_LCI.flexdmg", 
+                "Effect_size_LCI.ptvraredmg", "Effect_size_LCI.URmtr",	"Effect_size_UCI.flexdmg", 
+                "Effect_size_UCI.ptvraredmg", "Effect_size_UCI.URmtr"), round, digits = 3) %>% 
+    mutate_at(c("p_value.flexdmg", "p_value.ptvraredmg", "p_value.URmtr"), to_scientific) %>% 
+
+    #combining flexdmg columns to get effect size (95% CI) format
+    unite("flexdmg_CI", c(Effect_size_LCI.flexdmg, Effect_size_UCI.flexdmg), sep = ", ", remove = TRUE, na.rm = TRUE) %>% 
+    unite("flexdmg_effect_CI", c(Effect_size.flexdmg, flexdmg_CI), sep = " (", remove = TRUE, na.rm = TRUE) %>% 
+    mutate(cl_par = ')') %>%     # adding closing paranthesis to end of string in each row 
+    mutate(flexdmg_effect_CI = paste0(flexdmg_effect_CI, cl_par))   %>% 
+
+    #combining ptvraredmg columns to get effect size (95% CI) format
+    unite("ptvraredmg_CI", c(Effect_size_LCI.ptvraredmg, Effect_size_UCI.ptvraredmg), sep = ", ", remove = TRUE, na.rm = TRUE) %>% 
+    unite("ptvraredmg_effect_CI", c(Effect_size.ptvraredmg, ptvraredmg_CI), sep = " (", remove = TRUE, na.rm = TRUE) %>% 
+    mutate(cl_par = ')') %>%     # adding closing paranthesis to end of string in each row 
+    mutate(ptvraredmg_effect_CI = paste0(ptvraredmg_effect_CI, cl_par)) %>% 
+
+    #combining URmtr columns to get effect size (95% CI) format
+    unite("URmtr_CI", c(Effect_size_LCI.URmtr, Effect_size_UCI.URmtr), sep = ", ", remove = TRUE, na.rm = TRUE) %>% 
+    unite("URmtr_effect_CI", c(Effect_size.URmtr, URmtr_CI), sep = " (", remove = TRUE, na.rm = TRUE) %>% 
+    mutate(cl_par = ')') %>%     # adding closing paranthesis to end of string in each row 
+    mutate(URmtr_effect_CI = paste0(URmtr_effect_CI, cl_par)) %>% 
+
+    mutate(across(everything(), ~replace(., . ==  ')', NA))) %>% 
+
+    select(gene, flexdmg_effect_CI, p_value.flexdmg, ptvraredmg_effect_CI, p_value.ptvraredmg, URmtr_effect_CI, p_value.URmtr) %>% 
+    rename("Gene name" = gene, "Effect size (95% CI).1" = flexdmg_effect_CI, "P-value.1" = p_value.flexdmg, 
+           "Effect size (95% CI).2" = ptvraredmg_effect_CI, "P-value.2" = p_value.ptvraredmg, "Effect size (95% CI).3" = URmtr_effect_CI, 
+           "P-value.3" = p_value.URmtr)
+  
+names(syst_BP_automated_wide) <- sub("\\.\\d+$", "", names(syst_BP_automated_wide)) 
+   
+syst_BP_automated_wide %>% kbl() %>%
+                              kable_paper() %>%
+                              add_header_above(c(" " = 1, "Flexdmg" = 2, "ptvraredmg" = 2, "URmtr" = 2)) %>% 
+                              add_header_above(c(" ", "AstraZeneca Phewas Variant Collapsing Model" = 6)) %>% 
+                              column_spec(1, italic = T)
+```
+
+$~$
+
+#### Genebass Diastolic BP gene-level association results
+
+```{r}
+
+# rounding betas function so
+beta_round <- function(x) {
+    format(round(x, digits=3), nsmall =3) 
+}
+
+# dias_BP_automated
+diast_BP_automated_wide <- diastBP_aut_gb %>%  
+    mutate(BETA_LCI = BETA_Burden - 1.96 * SE_Burden) %>% 
+    mutate(BETA_UCI = BETA_Burden + 1.96 * SE_Burden) %>% 
+#    filter(p_value_skato <= 0.1) %>% # to match AZ filter 
+    filter(across(everything(), ~ !grepl(Inf, .))) %>%  # to remove genes with SE = Inf where model could not be fit 
+    select(gene, annotation, p_value_skato, BETA_Burden, BETA_LCI, BETA_UCI) %>% 
+    pivot_wider(names_from = annotation, names_sep = ".", values_from = c(p_value_skato, BETA_Burden, BETA_LCI, BETA_UCI)) %>% 
+    rename("p_value_skato.missense_LC" = "p_value_skato.missense|LC", "BETA_Burden.missense_LC" = "BETA_Burden.missense|LC", 
+           "BETA_LCI.missense_LC" = "BETA_LCI.missense|LC", "BETA_UCI.missense_LC" = "BETA_UCI.missense|LC") %>%  # fixing missense|LC notation
+    mutate_at(c("BETA_Burden.missense_LC", "BETA_Burden.pLoF", "BETA_Burden.synonymous", "BETA_LCI.missense_LC", 
+                "BETA_LCI.pLoF", "BETA_LCI.synonymous", "BETA_UCI.missense_LC", "BETA_UCI.pLoF", "BETA_UCI.synonymous"), beta_round) %>% 
+    mutate_at(c("p_value_skato.missense_LC", "p_value_skato.pLoF", "p_value_skato.synonymous"), to_scientific) %>% 
+
+    #combining missense_LC columns to get beta (95% CI) format
+    unite("missense_LC_CI", c('BETA_LCI.missense_LC', 'BETA_UCI.missense_LC'), sep = ", ", remove = TRUE, na.rm = TRUE) %>% 
+    unite("missense_LC_BETA_CI", c('BETA_Burden.missense_LC', 'missense_LC_CI'), sep = " (", remove = TRUE, na.rm = TRUE) %>% 
+    mutate(cl_par = ')') %>%     # adding closing paranthesis to end of string in each row 
+    mutate('missense_LC_BETA_CI' = paste0(missense_LC_BETA_CI, cl_par))   %>% 
+
+    # combining pLoF columns to get beta (95% CI) format
+    unite("pLoF_CI", c('BETA_LCI.pLoF', 'BETA_UCI.pLoF'), sep = ", ", remove = TRUE, na.rm = TRUE) %>% 
+    unite("pLoF_BETA_CI", c('BETA_Burden.pLoF', 'pLoF_CI'), sep = " (", remove = TRUE, na.rm = TRUE) %>% 
+    mutate(cl_par = ')') %>%     # adding closing paranthesis to end of string in each row 
+    mutate('pLoF_BETA_CI' = paste0(pLoF_BETA_CI, cl_par)) %>% 
+
+    # combining synonymous columns to get beta (95% CI) format
+    unite("synonymous_CI", c('BETA_LCI.synonymous', 'BETA_UCI.synonymous'), sep = ", ", remove = TRUE, na.rm = TRUE) %>% 
+    unite("synonymous_BETA_CI", c('BETA_Burden.synonymous', 'synonymous_CI'), sep = " (", remove = TRUE, na.rm = TRUE) %>% 
+    mutate(cl_par = ')') %>%     # adding closing paranthesis to end of string in each row 
+    mutate('synonymous_BETA_CI' = paste0(synonymous_BETA_CI, cl_par)) %>%   
+
+    mutate(across(everything(), ~replace(., . ==  ')', NA))) %>% 
+ #   mutate(across(everything(), ~replace(., . ==  '0 (-Inf, Inf)', NA))) %>% 
+
+    select(gene, missense_LC_BETA_CI, p_value_skato.missense_LC, pLoF_BETA_CI, p_value_skato.pLoF, synonymous_BETA_CI, p_value_skato.synonymous) %>% 
+    rename("Gene name" = gene, "BETA (95% CI).1" =  missense_LC_BETA_CI, "P-value SKATO.1" = p_value_skato.missense_LC, 
+           "BETA (95% CI).2" =  pLoF_BETA_CI, "P-value SKATO.2" = p_value_skato.pLoF, "BETA (95% CI).3" =  synonymous_BETA_CI, 
+           "P-value SKATO.3" = p_value_skato.synonymous)
+
+names(diast_BP_automated_wide) <- sub("\\.\\d+$", "", names(diast_BP_automated_wide)) 
+   
+diast_BP_automated_wide %>% kbl() %>%
+                              kable_paper() %>%
+                              add_header_above(c(" " = 1, "missense|LC" = 2, "pLoF" = 2, "synonymous" = 2)) %>% 
+                              add_header_above(c(" ", "Genebass Variant Collapsing Model" = 6)) %>% 
+                              column_spec(1, italic = T)
+```
+
+$~$
+
+#### Genebass Systolic BP gene-level association results
+
+```{r}
+# syst_BP_automated
+syst_BP_automated_wide <- systBP_aut_gb %>%  
+    mutate(BETA_LCI = BETA_Burden - 1.96 * SE_Burden) %>% 
+    mutate(BETA_UCI = BETA_Burden + 1.96 * SE_Burden) %>% 
+    filter(p_value_skato <= 0.1) %>% # to match AZ filter 
+    filter(across(everything(), ~ !grepl(Inf, .))) %>%  # to remove genes with SE = Inf where model could not be fit 
+    select(gene, annotation, p_value_skato, BETA_Burden, BETA_LCI, BETA_UCI) %>% 
+    pivot_wider(names_from = annotation, names_sep = ".", values_from = c(p_value_skato, BETA_Burden, BETA_LCI, BETA_UCI)) %>% 
+    rename("p_value_skato.missense_LC" = "p_value_skato.missense|LC", "BETA_Burden.missense_LC" = "BETA_Burden.missense|LC", 
+           "BETA_LCI.missense_LC" = "BETA_LCI.missense|LC", "BETA_UCI.missense_LC" = "BETA_UCI.missense|LC") %>%  # fixing missense|LC notation
+    mutate_at(c("BETA_Burden.missense_LC", "BETA_Burden.pLoF", "BETA_Burden.synonymous", "BETA_LCI.missense_LC", 
+                "BETA_LCI.pLoF", "BETA_LCI.synonymous", "BETA_UCI.missense_LC", "BETA_UCI.pLoF", "BETA_UCI.synonymous"), beta_round) %>% 
+    mutate_at(c("p_value_skato.missense_LC", "p_value_skato.pLoF", "p_value_skato.synonymous"), to_scientific) %>% 
+
+    #combining missense_LC columns to get beta (95% CI) format
+    unite("missense_LC_CI", c('BETA_LCI.missense_LC', 'BETA_UCI.missense_LC'), sep = ", ", remove = TRUE, na.rm = TRUE) %>% 
+    unite("missense_LC_BETA_CI", c('BETA_Burden.missense_LC', 'missense_LC_CI'), sep = " (", remove = TRUE, na.rm = TRUE) %>% 
+    mutate(cl_par = ')') %>%     # adding closing paranthesis to end of string in each row 
+    mutate('missense_LC_BETA_CI' = paste0(missense_LC_BETA_CI, cl_par))   %>% 
+
+    # combining pLoF columns to get beta (95% CI) format
+    unite("pLoF_CI", c('BETA_LCI.pLoF', 'BETA_UCI.pLoF'), sep = ", ", remove = TRUE, na.rm = TRUE) %>% 
+    unite("pLoF_BETA_CI", c('BETA_Burden.pLoF', 'pLoF_CI'), sep = " (", remove = TRUE, na.rm = TRUE) %>% 
+    mutate(cl_par = ')') %>%     # adding closing paranthesis to end of string in each row 
+    mutate('pLoF_BETA_CI' = paste0(pLoF_BETA_CI, cl_par)) %>% 
+
+    # combining synonymous columns to get beta (95% CI) format
+    unite("synonymous_CI", c('BETA_LCI.synonymous', 'BETA_UCI.synonymous'), sep = ", ", remove = TRUE, na.rm = TRUE) %>% 
+    unite("synonymous_BETA_CI", c('BETA_Burden.synonymous', 'synonymous_CI'), sep = " (", remove = TRUE, na.rm = TRUE) %>% 
+    mutate(cl_par = ')') %>%     # adding closing paranthesis to end of string in each row 
+    mutate('synonymous_BETA_CI' = paste0(synonymous_BETA_CI, cl_par)) %>%   
+
+    mutate(across(everything(), ~replace(., . ==  ')', NA))) %>% 
+
+    select(gene, missense_LC_BETA_CI, p_value_skato.missense_LC, pLoF_BETA_CI, p_value_skato.pLoF, synonymous_BETA_CI, p_value_skato.synonymous) %>% 
+    rename("Gene name" = gene, "BETA (95% CI).1" =  missense_LC_BETA_CI, "P-value SKATO.1" = p_value_skato.missense_LC, 
+           "BETA (95% CI).2" =  pLoF_BETA_CI, "P-value SKATO.2" = p_value_skato.pLoF, "BETA (95% CI).3" =  synonymous_BETA_CI, 
+           "P-value SKATO.3" = p_value_skato.synonymous)
+
+names(syst_BP_automated_wide) <- sub("\\.\\d+$", "", names(syst_BP_automated_wide)) 
+   
+syst_BP_automated_wide %>% kbl() %>%
+                              kable_paper() %>%
+                              add_header_above(c(" " = 1, "missense|LC" = 2, "pLoF" = 2, "synonymous" = 2)) %>% 
+                              add_header_above(c(" ", "Genebass Variant Collapsing Model" = 6)) %>% 
+                              column_spec(1, italic = T)
+```
+
+$~$
+
+#### AstraZeneca PheWas gene-level association p-value QQ plots for blood pressure phenotypes
+
+```{r, fig.width = 14, fig.height=10}
+# QQ plot of observed vs expected p-values of effect sizes for all BP-associated genes 
+
+par(bg = 'white', mfrow = c(2, 3), mar=c(5,4,4,2) + 1, (oma=c(3,3,3,3)))
+
+for (phen in unique(BP_aut_az$phenotype)){
+        for (mask in c('ptvraredmg', 'URmtr', 'flexdmg')) {
+
+                data <- BP_aut_az %>% 
+                        filter(phenotype == phen, collapsing_model == mask) %>% 
+                        mutate(phenotype = ifelse(phenotype == 'dias_BP_automated', 'Diastolic Blood Pressure', phenotype)) %>% 
+                        mutate(phenotype = ifelse(phenotype == 'syst_BP_automated', 'Systolic Blood Pressure', phenotype)) 
+
+                dummy_p = rep(1, times = 92 - nrow(data))
+                index = -log10(seq(1,92)/(92))
+                logp = -log10(sort(c(data$p_value, dummy_p)))
+                logupper=-log10(qbeta(0.975, seq(1,92), ((92)-seq(1,92)+1)))
+                loglower=-log10(qbeta(0.025, seq(1,92), ((92)-seq(1, 92)+1)))
+                qqplot(index,logp,xlab="Expected -log10p",ylab="Observed -log10p", 
+                       main = paste(unique(data$phenotype)[1], "\n", mask, sep = " "),pch=20,
+                       cex=1.2, cex.axis=1.8, cex.main=1.9,cex.lab=2, ylim=c(1,max(-log10(data$p_value))), xlim = c(1,max(index)))
+                lines(index,index)
+                lines(index,logupper, col = '#bebebe')
+                lines(index,loglower, col = '#bebebe')
+        }
+}
+
+# ggsave('figures/az_BP_qqplots.pdf', width = 14, height = 10, units = "in", dpi = 300)
+```
+
+$~$
+
+#### Genebass gene-level association p-value QQ plots for blood pressure phenotypes
+
+```{r, fig.width = 14, fig.height=10}
+# QQ plot of observed vs expected p-values of effect sizes for all BP-associated genes 
+
+par(bg = 'white', mfrow = c(2, 3), mar=c(5,4,4,2) + 1, (oma=c(3,3,3,3)))
+
+for (phen in unique(BP_aut_gb$phenotype)){
+        for (mask in unique(BP_aut_gb$annotation)) {
+
+                data <- BP_aut_gb %>% 
+                        filter(phenotype == phen, annotation == mask) %>% 
+                        mutate(phenotype = ifelse(phenotype == 'diast_BP_automated', 'Diastolic Blood Pressure', phenotype)) %>% 
+                        mutate(phenotype = ifelse(phenotype == 'syst_BP_automated', 'Systolic Blood Pressure', phenotype)) 
+
+                index = -log10(seq(1,nrow(data))/nrow(data))
+                logp = -log10(sort(data$p_value_skato))
+                logupper=-log10(qbeta(0.975, seq(1,nrow(data)), (nrow(data)-seq(1,nrow(data))+1)))
+                loglower=-log10(qbeta(0.025, seq(1,nrow(data)), (nrow(data)-seq(1,nrow(data))+1)))
+                qqplot(index,logp,xlab="Expected -log10p",ylab="Observed -log10p", 
+                       main = paste(unique(data$phenotype)[1], "\n", mask, sep = " "),pch=20,cex=1.2, cex.axis=1.8, cex.main=1.9,cex.lab=2)
+                lines(index,index)
+                lines(index,logupper, col = '#bebebe')
+                lines(index,loglower, col = '#bebebe')
+        }
+}
+```
+
+$~$
+
+#### AstraZeneca PheWas and Genebass gene-level association effects for diastolic blood pressure 
+
+$~$
+
+##### Gene associations with diastolic blood pressure (top 11 lowest p-values)
+
+```{r, fig.width = 12, fig.height=8}
+
+# adjusting p-value threshold for multiple testing (Bonferroni correction)
+
+adj_p_az <- round(0.05 / length(BP_genes$gene) / 3, 4)  # 3 total meaningful collapsing models tested: ptvraredmg, URmtr, flexdmg
+adj_p_gb <- round(0.05 / length(BP_genes$gene) / 2, 4)  # 2 total meaningful collapsing models tested: missense|LC, pLoF
+
+az_plot <- BP_aut_az %>%  
+            mutate(gene = as.factor(gene)) %>% 
+            filter(phenotype == 'dias_BP_automated') %>% 
+            mutate(p_size = ifelse(p_value <= adj_p_az, 'P \u2264 2e-04', 'P \u2265 2e-04')) %>% 
+            mutate(p_size = fct_relevel(p_size, "P \u2264 2e-04", "P \u2265 2e-04")) %>%
+            arrange(p_value) %>% 
+            head(11) %>% 
+            ggplot(aes(x = Effect_size, y = gene, color = collapsing_model, size = p_size, 
+                       xmin = Effect_size - 1.96 * Effect_size_standard_error, xmax = Effect_size + 1.96 * Effect_size_standard_error)) +
+            geom_pointrange(position=position_dodge(width=0.6)) +
+            geom_vline(xintercept = 0, linetype = 'longdash', colour = 'grey') +
+            guides(colour=guide_legend(title="Collapsing model")) +
+            scale_size_manual(values = c("P \u2264 2e-04" = 1, "P \u2265 2e-04"=0.4)) +
+            scale_color_manual(values = c("#00AFBB", "#E7B800", "#FC4E07")) +
+            scale_x_continuous(breaks = seq(-0.1, 0.5, by = 0.2), labels = seq(-0.1, 0.5, by = 0.2)) +
+            xlab("Effect size (95% CI)") + ylab("Gene") + labs(size = 'P-value') +
+            ggtitle("AstraZeneca PheWas") +
+            theme(text = element_text(size = 14))
+
+gb_plot <- BP_aut_gb %>%  
+            mutate(gene = as.factor(gene)) %>% 
+            filter(phenotype == 'diast_BP_automated') %>% 
+            mutate(p_size = ifelse(p_value_skato <= adj_p_gb, 'P \u2264 3e-04', 'P \u2265 3e-04')) %>% 
+            mutate(p_size = fct_relevel(p_size, "P \u2264 3e-04", "P \u2265 3e-04")) %>%
+            arrange(p_value_skato) %>%
+            mutate(syn_sign = ifelse(p_value_skato > adj_p_gb & annotation == 'synonymous', 'rem', 'keep')) %>% 
+            filter(syn_sign == 'keep') %>% 
+            head(11) %>%
+            ggplot(aes(x = BETA_Burden, y = gene, color = annotation, size = p_size, 
+                       xmin = BETA_Burden - 1.96 * SE_Burden, xmax = BETA_Burden + 1.96 * SE_Burden)) +
+            geom_pointrange(position=position_dodge(width=0.6)) +
+            geom_vline(xintercept = 0, linetype = 'longdash', colour = 'grey') +
+            guides(colour=guide_legend(title="Collapsing model")) +
+            scale_size_manual(values = c("P \u2264 3e-04" = 1, "P \u2265 3e-04"=0.4)) +
+            xlab("BETA (95% CI)") + ylab("Gene") + labs(size = "P-value") +
+            ggtitle("Genebass") +
+            theme(text = element_text(size = 14))
+
+top_11_diast_BP_fig <- az_plot + gb_plot 
+
+top_11_diast_BP_fig
+
+ggsave('figures/top_11_diast_BP_fig.pdf', width = 12, height = 8, encoding="MacRoman", units = "in", dpi = 300)
+```
+
+$~$
+
+#### AstraZeneca PheWas and Genebass gene-level association effects for systolic blood pressure 
+
+$~$
+
+##### Gene associations with systolic blood pressure (top 10 lowest p-values)
+
+```{r, fig.width = 10, fig.height=7}
+
+# adjusting p-value threshold for multiple testing (Bonferroni correction)
+
+adj_p_az <- round(0.05 / length(BP_genes$gene) / 3, 4)  # 3 total meaningful collapsing models tested: ptvraredmg, URmtr, flexdmg
+adj_p_gb <- round(0.05 / length(BP_genes$gene) / 2, 4)  # 2 total meaningful collapsing models tested: missense|LC, pLoF
+
+az_plot <- BP_aut_az %>%  
+            mutate(gene = as.factor(gene)) %>% 
+            filter(phenotype == 'syst_BP_automated') %>% 
+            mutate(p_size = ifelse(p_value <= adj_p_az, 'P \u2264 2e-04', 'P \u2265 2e-04')) %>% 
+            mutate(p_size = fct_relevel(p_size, "P \u2264 2e-04", "P \u2265 2e-04")) %>%
+            arrange(p_value) %>% 
+            head(11) %>% 
+            ggplot(aes(x = Effect_size, y = gene, color = collapsing_model, size = p_size, 
+                       xmin = Effect_size - 1.96 * Effect_size_standard_error, xmax = Effect_size + 1.96 * Effect_size_standard_error)) +
+            geom_pointrange(position=position_dodge(width=0.6)) +
+            geom_vline(xintercept = 0, linetype = 'longdash', colour = 'grey') +
+            guides(colour=guide_legend(title="Collapsing model")) +
+            scale_color_manual(values = c("#00AFBB", "#E7B800", "#FC4E07")) +
+            scale_size_manual(values = c("P \u2264 2e-04" = 1, "P \u2265 2e-04"=0.4)) +
+            scale_x_continuous(breaks = seq(-0.4, 0.4, by = 0.2), labels = seq(-0.4, 0.4, by = 0.2)) +
+            xlab("Effect size (95% CI)") + ylab("Gene") + labs(size = 'P-value') +
+            ggtitle("AstraZeneca PheWas") +
+            theme(text = element_text(size = 14))
+
+gb_plot <- BP_aut_gb %>%  
+            mutate(gene = as.factor(gene)) %>% 
+            filter(phenotype == 'syst_BP_automated') %>% 
+            mutate(p_size = ifelse(p_value_skato <= adj_p_gb, 'P \u2264 3e-04', 'P \u2265 3e-04')) %>% 
+            mutate(p_size = fct_relevel(p_size, "P \u2264 3e-04", "P \u2265 3e-04")) %>%
+            arrange(p_value_skato) %>% 
+            head(11) %>%
+            ggplot(aes(x = BETA_Burden, y = gene, color = annotation, size = p_size, 
+                       xmin = BETA_Burden - 1.96 * SE_Burden, xmax = BETA_Burden + 1.96 * SE_Burden)) +
+            geom_pointrange(position=position_dodge(width=0.6)) +
+            geom_vline(xintercept = 0, linetype = 'longdash', colour = 'grey') +
+            guides(colour=guide_legend(title="Collapsing model")) +
+            scale_size_manual(values = c("P \u2264 3e-04" = 1, "P \u2265 3e-04"=0.4)) +
+            xlab("BETA (95% CI)") + ylab("Gene") + labs(size = 'P-value') +
+            ggtitle("Genebass") +
+            theme(text = element_text(size = 14))
+
+top_11_syst_BP_fig <- az_plot + gb_plot 
+
+top_11_syst_BP_fig
+
+ggsave('figures/top_11_syst_BP_fig.pdf', width = 12, height = 8, encoding="MacRoman", units = "in", dpi = 300)
+```
+
+```{r}
+# Getting list of genes to take forward to preeclampsia association testing 
+
+BP_genes_to_preecl <- unique(c(BP_aut_az$gene[BP_aut_az$p_value <= adj_p_az], BP_aut_gb$gene[BP_aut_gb$p_value_skato <= adj_p_gb]))
+
+# BP_genes_to_preecl %>% as.character %>% dput
+```
+
+$~$
+
+### AstraZeneca PheWas and Genebass gene-level association results for preeclampsia phenotypes 
+
+```{r}
+# Importing Astrazeneca preeclampsia association results from file downloaded from AZ Phewas portal (only union phenotypes included)
+
+# Union#O140#O14.0 Moderate preeclampsia
+
+preecl_mod_union <- read_csv("Union_O140_O14.0_Moderate_preeclampsia_filtered_table_AZ_PheWAS_Portal.csv")
+
+preecl_mod_union <- preecl_mod_union %>% 
+                          # extracting the genes in our curated BP genes list
+                          filter(Gene %in% unique(BP_genes$gene))  %>% 
+                          # adding phenotype ID column
+                          mutate(phenotype = "preeclampsia_moderate_union") %>% 
+                          # renaming columns 
+                          rename(gene = "Gene", collapsing_model = "Collapsing model", p_value = "P value", N_participants = "No. participants", 
+                                 N_cases_with_QV = "No. cases with QV", percent_cases_with_QV = "% cases with QV", 
+                                 N_controls_with_QV = "No. controls with QV", percent_controls_with_QV = "% controls with QV", 
+                                 odds_ratio = "Odds ratio", odds_ratio_LCI = "Odds ratio LCI", odds_ratio_UCI = "Odds ratio UCI")
+                      
+## Union#O149#O14.9 Preeclampsia| unspecified
+
+preecl_unsp_union <- read_csv("Union_O149_O14.9_Preeclampsia_unspecified_filtered_table_AZ_PheWAS_Portal.csv")
+
+preecl_unsp_union <- preecl_unsp_union %>% 
+                          # extracting the genes in our curated BP genes list
+                          filter(Gene %in% unique(BP_genes$gene))  %>% 
+                          # adding phenotype ID column
+                          mutate(phenotype = "preeclampsia_unspecified_union") %>% 
+                          # renaming columns 
+                          rename(gene = "Gene", collapsing_model = "Collapsing model", p_value = "P value", N_participants = "No. participants", 
+                                 N_cases_with_QV = "No. cases with QV", percent_cases_with_QV = "% cases with QV", 
+                                 N_controls_with_QV = "No. controls with QV", percent_controls_with_QV = "% controls with QV", 
+                                 odds_ratio = "Odds ratio", odds_ratio_LCI = "Odds ratio LCI", odds_ratio_UCI = "Odds ratio UCI")
+
+# concatenating preeclampsia tables and converting odds ratios to effect sizes for consistency 
+preecl_az <- rbind(preecl_mod_union, preecl_unsp_union) %>%    
+              filter(collapsing_model %in% c('ptvraredmg', 'URmtr', 'flexdmg')) %>% 
+              mutate(Effect_size = log(odds_ratio)) %>% 
+              mutate(Effect_size_LCI = log(odds_ratio_LCI)) %>% 
+              mutate(Effect_size_UCI = log(odds_ratio_UCI)) %>% 
+              select(-starts_with('odds'))
+```
+
+```{r}
+## extracting preeclampsia phenotypes from genebass gene-level association results file 
+
+preecl_gb <- genebass_assoc %>% 
+                filter(description == 'Date O14 first reported (gestational [pregnancy-induced] hypertension with significant proteinuria)') %>% 
+                mutate(phenotype = 'preecl_O14') %>% 
+                select(!description)
+```
+
+$~$
+
+#### AstraZeneca PheWas preeclampsia (moderate) gene-level association results
+
+```{r}
+preecl_az_wide <- preecl_az %>% 
+        filter(phenotype == 'preeclampsia_moderate_union') %>% 
+        select(gene, collapsing_model, p_value, Effect_size, Effect_size_LCI, Effect_size_UCI) %>% 
+        pivot_wider(names_from = collapsing_model, names_sep = ".", values_from = c(p_value, Effect_size, Effect_size_LCI, Effect_size_UCI)) %>% 
+        mutate_at(c("Effect_size.flexdmg", "Effect_size.ptvraredmg", "Effect_size.URmtr", "Effect_size_LCI.flexdmg", 
+                    "Effect_size_LCI.ptvraredmg", "Effect_size_LCI.URmtr",	"Effect_size_UCI.flexdmg", 
+                    "Effect_size_UCI.ptvraredmg", "Effect_size_UCI.URmtr"), round, digits = 3) %>% 
+        mutate_at(c("p_value.flexdmg", "p_value.ptvraredmg", "p_value.URmtr"), to_scientific) %>% 
+    
+        #combining flexdmg columns to get effect size (95% CI) format
+        unite("flexdmg_CI", c(Effect_size_LCI.flexdmg, Effect_size_UCI.flexdmg), sep = ", ", remove = TRUE, na.rm = TRUE) %>% 
+        unite("flexdmg_effect_CI", c(Effect_size.flexdmg, flexdmg_CI), sep = " (", remove = TRUE, na.rm = TRUE) %>% 
+        mutate(cl_par = ')') %>%     # adding closing paranthesis to end of string in each row 
+        mutate(flexdmg_effect_CI = paste0(flexdmg_effect_CI, cl_par))   %>% 
+    
+        #combining ptvraredmg columns to get effect size (95% CI) format
+        unite("ptvraredmg_CI", c(Effect_size_LCI.ptvraredmg, Effect_size_UCI.ptvraredmg), sep = ", ", remove = TRUE, na.rm = TRUE) %>% 
+        unite("ptvraredmg_effect_CI", c(Effect_size.ptvraredmg, ptvraredmg_CI), sep = " (", remove = TRUE, na.rm = TRUE) %>% 
+        mutate(cl_par = ')') %>%     # adding closing paranthesis to end of string in each row 
+        mutate(ptvraredmg_effect_CI = paste0(ptvraredmg_effect_CI, cl_par)) %>% 
+    
+        #combining URmtr columns to get effect size (95% CI) format
+        unite("URmtr_CI", c(Effect_size_LCI.URmtr, Effect_size_UCI.URmtr), sep = ", ", remove = TRUE, na.rm = TRUE) %>% 
+        unite("URmtr_effect_CI", c(Effect_size.URmtr, URmtr_CI), sep = " (", remove = TRUE, na.rm = TRUE) %>% 
+        mutate(cl_par = ')') %>%     # adding closing paranthesis to end of string in each row 
+        mutate(URmtr_effect_CI = paste0(URmtr_effect_CI, cl_par)) %>% 
+    
+        mutate(across(everything(), ~replace(., . ==  ')', NA))) %>% 
+    
+        select(gene, flexdmg_effect_CI, p_value.flexdmg, ptvraredmg_effect_CI, p_value.ptvraredmg, URmtr_effect_CI, p_value.URmtr) %>% 
+        rename("Gene name" = gene, "Effect size (95% CI).1" = flexdmg_effect_CI, "P-value.1" = p_value.flexdmg, 
+           "Effect size (95% CI).2" = ptvraredmg_effect_CI, "P-value.2" = p_value.ptvraredmg, "Effect size (95% CI).3" = URmtr_effect_CI, 
+           "P-value.3" = p_value.URmtr)
+
+names(preecl_az_wide) <- sub("\\.\\d+$", "", names(preecl_az_wide)) 
+   
+preecl_az_wide %>% kbl() %>%
+                      kable_paper() %>%
+                      add_header_above(c(" " = 1, "Flexdmg" = 2, "ptvraredmg" = 2, "URmtr" = 2)) %>% 
+                      add_header_above(c(" ", "AstraZeneca Phewas Variant Collapsing Model" = 6)) %>% 
+                      column_spec(1, italic = T)
+```
+
+$~$
+
+#### AstraZeneca PheWas preeclampsia (unspecified) gene-level association results
+
+```{r}
+preecl_az_wide <- preecl_az %>% 
+        filter(phenotype == 'preeclampsia_unspecified_union') %>% 
+        select(gene, collapsing_model, p_value, Effect_size, Effect_size_LCI, Effect_size_UCI) %>% 
+        pivot_wider(names_from = collapsing_model, names_sep = ".", values_from = c(p_value, Effect_size, Effect_size_LCI, Effect_size_UCI)) %>% 
+        mutate_at(c("Effect_size.flexdmg", "Effect_size.ptvraredmg", "Effect_size.URmtr", "Effect_size_LCI.flexdmg", 
+                    "Effect_size_LCI.ptvraredmg", "Effect_size_LCI.URmtr",	"Effect_size_UCI.flexdmg", 
+                    "Effect_size_UCI.ptvraredmg", "Effect_size_UCI.URmtr"), round, digits = 3) %>% 
+        mutate_at(c("p_value.flexdmg", "p_value.ptvraredmg", "p_value.URmtr"), to_scientific) %>% 
+    
+        #combining flexdmg columns to get effect size (95% CI) format
+        unite("flexdmg_CI", c(Effect_size_LCI.flexdmg, Effect_size_UCI.flexdmg), sep = ", ", remove = TRUE, na.rm = TRUE) %>% 
+        unite("flexdmg_effect_CI", c(Effect_size.flexdmg, flexdmg_CI), sep = " (", remove = TRUE, na.rm = TRUE) %>% 
+        mutate(cl_par = ')') %>%     # adding closing paranthesis to end of string in each row 
+        mutate(flexdmg_effect_CI = paste0(flexdmg_effect_CI, cl_par))   %>% 
+    
+        #combining ptvraredmg columns to get effect size (95% CI) format
+        unite("ptvraredmg_CI", c(Effect_size_LCI.ptvraredmg, Effect_size_UCI.ptvraredmg), sep = ", ", remove = TRUE, na.rm = TRUE) %>% 
+        unite("ptvraredmg_effect_CI", c(Effect_size.ptvraredmg, ptvraredmg_CI), sep = " (", remove = TRUE, na.rm = TRUE) %>% 
+        mutate(cl_par = ')') %>%     # adding closing paranthesis to end of string in each row 
+        mutate(ptvraredmg_effect_CI = paste0(ptvraredmg_effect_CI, cl_par)) %>% 
+    
+        #combining URmtr columns to get effect size (95% CI) format
+        unite("URmtr_CI", c(Effect_size_LCI.URmtr, Effect_size_UCI.URmtr), sep = ", ", remove = TRUE, na.rm = TRUE) %>% 
+        unite("URmtr_effect_CI", c(Effect_size.URmtr, URmtr_CI), sep = " (", remove = TRUE, na.rm = TRUE) %>% 
+        mutate(cl_par = ')') %>%     # adding closing paranthesis to end of string in each row 
+        mutate(URmtr_effect_CI = paste0(URmtr_effect_CI, cl_par)) %>% 
+    
+        mutate(across(everything(), ~replace(., . ==  ')', NA))) %>% 
+    
+        select(gene, flexdmg_effect_CI, p_value.flexdmg, ptvraredmg_effect_CI, p_value.ptvraredmg, URmtr_effect_CI, p_value.URmtr) %>% 
+        rename("Gene name" = gene, "Effect size (95% CI).1" = flexdmg_effect_CI, "P-value.1" = p_value.flexdmg, 
+           "Effect size (95% CI).2" = ptvraredmg_effect_CI, "P-value.2" = p_value.ptvraredmg, "Effect size (95% CI).3" = URmtr_effect_CI, 
+           "P-value.3" = p_value.URmtr)
+
+names(preecl_az_wide) <- sub("\\.\\d+$", "", names(preecl_az_wide)) 
+   
+preecl_az_wide %>% kbl() %>%
+                      kable_paper() %>%
+                      add_header_above(c(" " = 1, "Flexdmg" = 2, "ptvraredmg" = 2, "URmtr" = 2)) %>% 
+                      add_header_above(c(" ", "AstraZeneca Phewas Variant Collapsing Model" = 6)) %>% 
+                      column_spec(1, italic = T)
+```
+
+$~$
+
+#### Genebass preeclampsia (014) gene-level association results
+
+```{r}
+preecl_gb_wide <- preecl_gb %>%  
+    mutate(BETA_LCI = BETA_Burden - 1.96 * SE_Burden) %>% 
+    mutate(BETA_UCI = BETA_Burden + 1.96 * SE_Burden) %>% 
+    #filter(p_value_skato <= 0.1) %>% # to match AZ filter 
+    select(gene, annotation, p_value_skato, BETA_Burden, BETA_LCI, BETA_UCI) %>% 
+    pivot_wider(names_from = annotation, names_sep = ".", values_from = c(p_value_skato, BETA_Burden, BETA_LCI, BETA_UCI)) %>% 
+    rename("p_value_skato.missense_LC" = "p_value_skato.missense|LC", "BETA_Burden.missense_LC" = "BETA_Burden.missense|LC", 
+           "BETA_LCI.missense_LC" = "BETA_LCI.missense|LC", "BETA_UCI.missense_LC" = "BETA_UCI.missense|LC") %>%  # fixing missense|LC notation
+    mutate_at(c("BETA_Burden.missense_LC", "BETA_Burden.pLoF", "BETA_Burden.synonymous", "BETA_LCI.missense_LC", 
+                "BETA_LCI.pLoF", "BETA_LCI.synonymous", "BETA_UCI.missense_LC", "BETA_UCI.pLoF", "BETA_UCI.synonymous"), round, digits = 3) %>% 
+    mutate_at(c("p_value_skato.missense_LC", "p_value_skato.pLoF", "p_value_skato.synonymous"), to_scientific) %>% 
+
+    #combining missense_LC columns to get beta (95% CI) format
+    unite("missense_LC_CI", c('BETA_LCI.missense_LC', 'BETA_UCI.missense_LC'), sep = ", ", remove = TRUE, na.rm = TRUE) %>% 
+    unite("missense_LC_BETA_CI", c('BETA_Burden.missense_LC', 'missense_LC_CI'), sep = " (", remove = TRUE, na.rm = TRUE) %>% 
+    mutate(cl_par = ')') %>%     # adding closing paranthesis to end of string in each row 
+    mutate('missense_LC_BETA_CI' = paste0(missense_LC_BETA_CI, cl_par))   %>% 
+
+    # combining pLoF columns to get beta (95% CI) format
+    unite("pLoF_CI", c('BETA_LCI.pLoF', 'BETA_UCI.pLoF'), sep = ", ", remove = TRUE, na.rm = TRUE) %>% 
+    unite("pLoF_BETA_CI", c('BETA_Burden.pLoF', 'pLoF_CI'), sep = " (", remove = TRUE, na.rm = TRUE) %>% 
+    mutate(cl_par = ')') %>%     # adding closing paranthesis to end of string in each row 
+    mutate('pLoF_BETA_CI' = paste0(pLoF_BETA_CI, cl_par)) %>% 
+
+    # combining synonymous columns to get beta (95% CI) format
+    unite("synonymous_CI", c('BETA_LCI.synonymous', 'BETA_UCI.synonymous'), sep = ", ", remove = TRUE, na.rm = TRUE) %>% 
+    unite("synonymous_BETA_CI", c('BETA_Burden.synonymous', 'synonymous_CI'), sep = " (", remove = TRUE, na.rm = TRUE) %>% 
+    mutate(cl_par = ')') %>%     # adding closing paranthesis to end of string in each row 
+    mutate('synonymous_BETA_CI' = paste0(synonymous_BETA_CI, cl_par)) %>%   
+
+    mutate(across(everything(), ~replace(., . ==  ')', NA))) %>% 
+
+    select(gene, missense_LC_BETA_CI, p_value_skato.missense_LC, pLoF_BETA_CI, p_value_skato.pLoF, synonymous_BETA_CI, p_value_skato.synonymous) %>% 
+    rename("Gene name" = gene, "BETA (95% CI).1" =  missense_LC_BETA_CI, "P-value SKATO.1" = p_value_skato.missense_LC, 
+           "BETA (95% CI).2" =  pLoF_BETA_CI, "P-value SKATO.2" = p_value_skato.pLoF, "BETA (95% CI).3" =  synonymous_BETA_CI, 
+           "P-value SKATO.3" = p_value_skato.synonymous)
+
+names(preecl_gb_wide) <- sub("\\.\\d+$", "", names(preecl_gb_wide)) 
+   
+preecl_gb_wide %>% kbl() %>%
+                      kable_paper() %>%
+                      add_header_above(c(" " = 1, "missense|LC" = 2, "pLoF" = 2, "synonymous" = 2)) %>% 
+                      add_header_above(c(" ", "Genebass Variant Collapsing Model" = 6)) %>% 
+                      column_spec(1, italic = T)
+```
+
+$~$
+
+#### AstraZeneca PheWas gene-level association p-value QQ plots for preeclampsia phenotypes
+
+```{r, fig.width = 14, fig.height=10}
+# QQ plot of observed vs expected p-values of effect sizes for all preeclampsia-associated genes 
+
+par(bg = 'white', mfrow = c(2, 3), mar=c(5,4,4,2) + 1, (oma=c(3,3,3,3)))
+
+for (phen in unique(preecl_az$phenotype)){
+        for (mask in c('ptvraredmg', 'URmtr', 'flexdmg')) {
+
+                data <- preecl_az %>% 
+                        filter(phenotype == phen, collapsing_model == mask) %>% 
+                        mutate(phenotype = ifelse(phenotype == 'preeclampsia_moderate_union', 
+                                                  'Preeclampsia (moderate)', phenotype)) %>% 
+                        mutate(phenotype = ifelse(phenotype == 'preeclampsia_unspecified_union', 
+                                                  'Preeclampsia (unspecified)', phenotype)) 
+
+                dummy_p = rep(1, times = 92 - nrow(data))
+                index = -log10(seq(1,92)/(92))
+                logp = -log10(sort(c(data$p_value, dummy_p)))
+                logupper=-log10(qbeta(0.975, seq(1,92), ((92)-seq(1,92)+1)))
+                loglower=-log10(qbeta(0.025, seq(1,92), ((92)-seq(1, 92)+1)))
+                qqplot(index,logp,xlab="Expected -log10p",ylab="Observed -log10p", 
+                       main = paste(unique(data$phenotype)[1], "\n", mask, sep = " "),pch=20,
+                       cex=1.2,cex.main=1.9,cex.lab=2, ylim=c(1,max(-log10(data$p_value))), xlim = c(1,max(index)))
+                lines(index,index)
+                lines(index,logupper, col = '#bebebe')
+                lines(index,loglower, col = '#bebebe')
+        }
+}
+```
+
+$~$
+
+#### Genebass gene-level association p-value QQ plots for preeclampsia 014 phenotype
+
+```{r, fig.width = 14, fig.height=5}
+# QQ plot of observed vs expected p-values of effect sizes for all preeclampsia-associated genes 
+
+par(bg = 'white', mfrow = c(1, 3), mar=c(5,4,4,2) + 1, (oma=c(3,3,3,3)))
+
+for (mask in unique(preecl_gb$annotation)) {
+        data <- preecl_gb %>% 
+                filter(annotation == mask)
+        index = -log10(seq(1,nrow(data))/nrow(data))
+        logp = -log10(sort(data$p_value_skato))
+        logupper=-log10(qbeta(0.975, seq(1,nrow(data)), (nrow(data)-seq(1,nrow(data))+1)))
+        loglower=-log10(qbeta(0.025, seq(1,nrow(data)), (nrow(data)-seq(1,nrow(data))+1)))
+        qqplot(index,logp,xlab="Expected -log10p",ylab="Observed -log10p",
+               main = paste('Preeclampsia', "\n", mask, sep = " "),pch=20,cex=1,cex.main=1.8,cex.lab=2)
+        lines(index,index)
+        lines(index,logupper, col = '#bebebe')
+        lines(index,loglower, col = '#bebebe')
+}
+```
+
+$~$
+
+```{r}
+# genes with prior BP association from astraz
+BP_aut_az$gene[BP_aut_az$p_value <= adj_p_az]
+
+# genes with prior BP association from genebass
+BP_aut_gb$gene[BP_aut_gb$p_value_skato <= adj_p_gb]
+```
+
+$~$
+
+##### AstraZeneca gene-level association effects for preeclampsia phenotypes (top 10 lowest p-values and highlighting genes with rare variants associated with BP phenotypes in previous AstraZeneca or Genebass analysis)
+
+```{r, fig.width = 11, fig.height=7}
+
+## preeclampsia_moderate_union
+
+preecl_mod_plot <- preecl_az %>%  
+            filter(phenotype == 'preeclampsia_moderate_union') %>% 
+            mutate(prior_BP = ifelse(gene %in% c(BP_aut_az$gene[BP_aut_az$p_value <= adj_p_az], BP_aut_gb$gene[BP_aut_gb$p_value_skato <= adj_p_gb]), 
+                                     'Prior rare variant association with BP phenotype', 'No prior rare variant association with BP phenotype')) %>% 
+            mutate(prior_BP = fct_relevel(prior_BP, "Prior rare variant association with BP phenotype", "No prior rare variant association with BP phenotype")) %>%
+            mutate(gene = ifelse(gene %in% BP_aut_gb$gene[BP_aut_gb$p_value_skato <= adj_p_gb], paste(gene, "*"), gene)) %>%  # adding * to genes with prior rare variant assoc in genebass
+            mutate(gene = as.factor(gene)) %>%
+            arrange(p_value) %>% 
+            head(10) %>% 
+            ggplot(aes(x = Effect_size, y = gene, color = collapsing_model, shape = prior_BP, 
+                       xmin = Effect_size_LCI, xmax = Effect_size_UCI)) +
+            geom_pointrange(position=position_dodge(width=0.6)) +
+            geom_vline(xintercept = 0, linetype = 'longdash', colour = 'grey') +
+            guides(colour=guide_legend(title="Collapsing model")) +
+            xlim(-1, 6) +
+            scale_color_manual(values = c("#00AFBB", "#E7B800", "#FC4E07")) +
+            scale_shape_manual(values = c("Prior rare variant association with BP phenotype" = 16, "No prior rare variant association with BP phenotype"=2)) +
+            xlab("Effect size (95% CI)") + ylab("Gene") + labs(shape = '') +
+            ggtitle("Moderate Preeclampsia") +
+            theme(text = element_text(size = 13))
+
+
+## preeclampsia_unspecified_union
+
+preecl_unsp_plot <- preecl_az %>%  
+            filter(phenotype == 'preeclampsia_unspecified_union') %>% 
+            mutate(prior_BP = ifelse(gene %in% c(BP_aut_az$gene[BP_aut_az$p_value <= adj_p_az], BP_aut_gb$gene[BP_aut_gb$p_value_skato <= adj_p_gb]), 
+                                     'Prior rare variant association with BP phenotype', 'No prior rare variant association with BP phenotype')) %>% 
+            mutate(prior_BP = fct_relevel(prior_BP, "Prior rare variant association with BP phenotype", "No prior rare variant association with BP phenotype")) %>%
+            mutate(gene = ifelse(gene %in% BP_aut_gb$gene[BP_aut_gb$p_value_skato <= adj_p_gb], paste(gene, "*"), gene)) %>%  # adding * to genes with prior rare variant assoc in genebass
+            mutate(gene = as.factor(gene)) %>%
+            arrange(p_value) %>% 
+            head(10) %>% 
+            ggplot(aes(x = Effect_size, y = gene, color = collapsing_model, shape = prior_BP, 
+                       xmin = Effect_size_LCI, xmax = Effect_size_UCI)) +
+            geom_pointrange(position=position_dodge(width=0.6)) +
+            geom_vline(xintercept = 0, linetype = 'longdash', colour = 'grey') +
+            guides(colour=guide_legend(title="Collapsing model")) +
+            xlim(-1, 7) +
+            scale_color_manual(values = c("#00AFBB", "#E7B800", "#FC4E07")) +
+            scale_shape_manual(values = c("Prior rare variant association with BP phenotype" = 16, "No prior rare variant association with BP phenotype"=2)) +
+            xlab("Effect size (95% CI)") + ylab("Gene") + labs(shape = '') +
+            ggtitle("Unspecified Preeclampsia") +
+            theme(text = element_text(size = 13))
+
+AZ_preecl_fig <- preecl_mod_plot + preecl_unsp_plot + plot_layout(guides = "collect")
+
+AZ_preecl_fig
+
+ggsave('figures/AZ_preecl_fig.pdf', width = 11, height = 7, units = "in", dpi = 300)
+```
+
+$~$
+
+##### Genebass gene-level association effects for preeclampsia (top 10 lowest p-values on left and highlighting genes with rare variants associated with BP phenotypes in previous Genebass analysis on right)
+
+```{r, fig.width = 10, fig.height=7}
+
+preecl_014_plot_top10 <- preecl_gb %>%
+            mutate(gene = as.factor(gene)) %>% 
+            mutate(prior_BP = ifelse(gene %in% BP_aut_gb$gene[BP_aut_gb$p_value_skato <= adj_p_gb], 
+                                     'Prior rare variant association with BP phenotype', 'No prior rare variant association with BP phenotype')) %>% 
+            mutate(prior_BP = fct_relevel(prior_BP, 'Prior rare variant association with BP phenotype', 'No prior rare variant association 
+                                          with BP phenotype')) %>%
+            arrange(p_value_skato) %>% 
+            head(10) %>%
+            #filter(p_value_skato <= 0.05) %>% 
+            ggplot(aes(x = BETA_Burden, y = gene, color = annotation, shape = prior_BP, 
+                       xmin = BETA_Burden - 1.96 * SE_Burden, xmax = BETA_Burden + 1.96 * SE_Burden)) +
+            geom_pointrange(position=position_dodge(width=0.6)) +
+            geom_vline(xintercept = 0, linetype = 'longdash', colour = 'grey') +
+            guides(colour=guide_legend(title="Collapsing model")) +
+            coord_cartesian(xlim=c(-0.5, 0.5)) +
+            scale_shape_manual(values = c('Prior rare variant association with BP phenotype' = 16, 'No prior rare variant association with BP phenotype'=2)) +
+            xlab("BETA (95% CI)") + ylab("Gene") + labs(shape = '') +
+            ggtitle("Lowest P-value hits") +
+            theme(text = element_text(size = 13))
+
+preecl_014_plot_priorBP <- preecl_gb %>%
+            filter(gene %in% BP_aut_gb$gene[BP_aut_gb$p_value_skato <= adj_p_gb]) %>% 
+            mutate(gene = as.factor(gene)) %>% 
+            mutate(prior_BP = ifelse(gene %in% BP_aut_gb$gene[BP_aut_gb$p_value_skato <= adj_p_gb], 
+                                     'Prior rare variant association with BP phenotype', 'No prior rare variant association with BP phenotype')) %>% 
+            mutate(prior_BP = fct_relevel(prior_BP, 'Prior rare variant association with BP phenotype', 'No prior rare variant association with BP phenotype')) %>%
+            #arrange(p_value_skato) %>% 
+            #head(10) %>%
+            #filter(p_value_skato <= 0.05) %>% 
+            ggplot(aes(x = BETA_Burden, y = gene, color = annotation, shape = prior_BP, 
+                       xmin = BETA_Burden - 1.96 * SE_Burden, xmax = BETA_Burden + 1.96 * SE_Burden)) +
+            geom_pointrange(position=position_dodge(width=0.6)) +
+            geom_vline(xintercept = 0, linetype = 'longdash', colour = 'grey') +
+            guides(colour=guide_legend(title="Collapsing model")) +
+            coord_cartesian(xlim=c(-0.5, 0.5)) +
+            scale_shape_manual(values = c('Prior rare variant association with BP phenotype' = 16, 'No prior rare variant association with BP phenotype'=2)) +
+            xlab("BETA (95% CI)") + ylab("Gene") + labs(shape = '') +
+            ggtitle("Genes with prior rare variant\n BP associations") +
+            theme(text = element_text(size = 13))
+
+GB_preecl_fig <- preecl_014_plot_top10 + preecl_014_plot_priorBP + plot_layout(guides = "collect")
+
+GB_preecl_fig
+
+ggsave('figures/GB_preecl_fig.pdf', width = 10, height = 7, units = "in", dpi = 300)
+```
